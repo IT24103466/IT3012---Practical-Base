@@ -1,15 +1,31 @@
-# visual_grid_game.py
+# visual_grid_game.py  (SE3062 Practical 02 version)
+import copy
 import random
 import tkinter as tk
+
+# directions (y goes up)
+HEADINGS = ['N', 'E', 'S', 'W']
+DELTA = {'N': (0, 1), 'E': (1, 0), 'S': (0, -1), 'W': (-1, 0)}
+
+
+def left_of(h):
+    return HEADINGS[(HEADINGS.index(h) - 1) % 4]
+
+
+def right_of(h):
+    return HEADINGS[(HEADINGS.index(h) + 1) % 4]
 
 
 class VisualGridHuntGame:
     """A flexible Pacman-style grid environment with support for configurable opponents and larger scales."""
 
-    def __init__(self, width=10, height=10, num_food=10, num_opponents=2, custom_walls=None, num_traps=5):
+    def __init__(self, width=10, height=10, num_food=10, num_opponents=2, custom_walls=None, num_traps=5,
+                 max_steps=60):
         self.width = width
         self.height = height
         self.agent_pos = [0, 0]  # Starting position (x, y)
+        self.facing = 'E'  # starts facing east
+        self.max_steps = max_steps
 
         if custom_walls is not None:
             self.walls = set(custom_walls)
@@ -51,45 +67,51 @@ class VisualGridHuntGame:
         self.score = 0
         self.steps = 0
         self.collision = False
+        self.stopped = False
+        self.visited_cells = {(0, 0)}  # just for drawing the trail
 
+    # helpers
+    def _cell_ahead(self):
+        dx, dy = DELTA[self.facing]
+        return (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
+
+    def _is_blocked(self, cell):
+        x, y = cell
+        outside = not (0 <= x < self.width and 0 <= y < self.height)
+        return outside or cell in self.walls
+
+    # agent only gets these two, no coordinates
     def get_percept(self) -> dict:
         return {
-            'agent_pos': list(self.agent_pos),
-            'opponent_positions': [list(op) for op in self.opponents],
-            'smells_food': tuple(self.agent_pos) in self.food_positions,
-            'smells_toxin': tuple(self.agent_pos) in self.toxic_traps,
-            'hit_wall': tuple(self.agent_pos) in self.walls,
-            'collision': self.collision,
-            'score': self.score,
-            'remaining_food': len(self.food_positions)
+            'wall_ahead': self._is_blocked(self._cell_ahead()),
+            'food_here': tuple(self.agent_pos) in self.food_positions,
         }
 
     def execute_action(self, action: str):
         self.steps += 1
-        new_pos = list(self.agent_pos)
 
-        if action == 'Up':
-            new_pos[1] = min(self.height - 1, new_pos[1] + 1)
-        elif action == 'Down':
-            new_pos[1] = max(0, new_pos[1] - 1)
-        elif action == 'Left':
-            new_pos[0] = max(0, new_pos[0] - 1)
-        elif action == 'Right':
-            new_pos[0] = min(self.width - 1, new_pos[0] + 1)
-
-        if tuple(new_pos) in self.walls:
-            self.score -= 5
-        else:
-            self.agent_pos = new_pos
+        if action == 'turn_left':
+            self.facing = left_of(self.facing)
+        elif action == 'turn_right':
+            self.facing = right_of(self.facing)
+        elif action == 'forward':
+            ahead = self._cell_ahead()
+            if self._is_blocked(ahead):
+                self.score -= 5  # bumped a wall
+            else:
+                self.agent_pos = list(ahead)
+                self.visited_cells.add(ahead)
+        elif action == 'suck':
+            tuple_pos = tuple(self.agent_pos)
+            if tuple_pos in self.food_positions:
+                self.food_positions.remove(tuple_pos)
+                self.score += 20
+        elif action == 'stop':
+            self.stopped = True
 
         # Toxic trap penalty
         if tuple(self.agent_pos) in self.toxic_traps:
             self.score -= 15
-
-        tuple_pos = tuple(self.agent_pos)
-        if tuple_pos in self.food_positions:
-            self.food_positions.remove(tuple_pos)
-            self.score += 20
 
         for op in self.opponents:
             move = random.choice(['Up', 'Down', 'Left', 'Right', 'Stay'])
@@ -107,18 +129,125 @@ class VisualGridHuntGame:
                 self.collision = True
 
     def is_done(self) -> bool:
-        return len(self.food_positions) == 0 or self.steps >= 60 or self.collision
+        return (len(self.food_positions) == 0 or self.steps >= self.max_steps
+                or self.collision or self.stopped)
+
+
+# simple reflex agent (no __init__, no memory)
+class SimpleReflexAgent:
+    """Only looks at the current percept."""
+
+    def sense_and_act(self, percept):
+        if percept['food_here']:  # food here -> suck
+            return 'suck'
+        if percept['wall_ahead']:  # wall ahead -> turn left
+            return 'turn_left'
+        return 'forward'  # otherwise keep going
+
+
+# model-based agent (remembers where it's been)
+class ModelBasedAgent:
+    """Tracks its own x, y since it can't see the real coordinates."""
+
+    def __init__(self):
+        self.x, self.y = 0, 0  # my own position, start is (0, 0)
+        self.heading = 'N'  # my own heading
+        self.visited = {(0, 0)}  # cells I've been on
+        self.walls = set()  # walls I've seen
+        self.last_action = None  # what I did last step
+
+    # helpers
+    def _cell(self, heading):
+        dx, dy = DELTA[heading]
+        return (self.x + dx, self.y + dy)
+
+    def _fresh(self, cell):
+        """Not visited and not a wall."""
+        return cell not in self.visited and cell not in self.walls
+
+    # update memory
+    def _update_state(self, percept):
+        # move/turn based on what I did last step
+        if self.last_action == 'turn_left':
+            self.heading = left_of(self.heading)
+        elif self.last_action == 'turn_right':
+            self.heading = right_of(self.heading)
+        elif self.last_action == 'forward':
+            # only goes forward when the way is clear, so it worked
+            self.x, self.y = self._cell(self.heading)
+        self.visited.add((self.x, self.y))
+
+        # note the wall if there is one
+        if percept['wall_ahead']:
+            self.walls.add(self._cell(self.heading))
+
+    # rules
+    def sense_and_act(self, percept):
+        self._update_state(percept)  # memory first
+
+        if percept['food_here']:  # eat if there's food
+            action = 'suck'
+        else:
+            action = self._choose_move(percept)
+        self.last_action = action  # remember for next step
+        return action
+
+    def _choose_move(self, percept):
+        ahead = self._cell(self.heading)
+        left = self._cell(left_of(self.heading))
+        right = self._cell(right_of(self.heading))
+        behind = self._cell(left_of(left_of(self.heading)))
+        ahead_free = not percept['wall_ahead']
+
+        if ahead_free and self._fresh(ahead):  # new cell ahead
+            return 'forward'
+        if self._fresh(left):  # new cell on the left
+            return 'turn_left'
+        if self._fresh(right):  # new cell on the right
+            return 'turn_right'
+        if self._fresh(behind):  # new cell behind
+            return 'turn_left'
+        return self._head_to_nearest_frontier(ahead_free)  # all nearby cells done, go find a new one
+
+    def _head_to_nearest_frontier(self, ahead_free):
+        """BFS through visited cells to the nearest cell with an unexplored neighbour."""
+        start = (self.x, self.y)
+        queue = [(start, None)]  # (cell, first step from start)
+        seen = {start}
+        while queue:
+            (cx, cy), first = queue.pop(0)
+            if first is not None and any(
+                    self._fresh((cx + DELTA[h][0], cy + DELTA[h][1])) for h in HEADINGS):
+                return self._turn_or_step(first, ahead_free)
+            for h in HEADINGS:
+                nxt = (cx + DELTA[h][0], cy + DELTA[h][1])
+                if nxt in self.visited and nxt not in seen:
+                    seen.add(nxt)
+                    queue.append((nxt, first or h))
+        return 'stop'  # nothing left
+
+    def _turn_or_step(self, direction, ahead_free):
+        if direction == self.heading:
+            return 'forward' if ahead_free else 'turn_left'
+        if direction == right_of(self.heading):
+            return 'turn_right'
+        return 'turn_left'  # left, or behind (turn twice)
 
 
 class GridGameGUI:
     """Tkinter wrapper that dynamically scales cell sizes to keep larger grids on screen."""
 
-    def __init__(self, root, width=10, height=10, num_food=12, num_opponents=2, walls=None):
+    def __init__(self, root, width=10, height=10, num_food=12, num_opponents=2, walls=None, num_traps=0,
+                 max_steps=600, delay_ms=60):
         self.root = root
-        self.root.title("IT3012 - Scalable Multi-Agent Grid Hunt")
+        self.root.title("SE3062 - Practical 02: Reflex vs Model-Based Agent")
+        self.delay_ms = delay_ms
 
-        self.env = VisualGridHuntGame(width=width, height=height, num_food=num_food, num_opponents=num_opponents,
-                                      custom_walls=walls)
+        # same layout every run so both agents get the same world
+        self.start_env = VisualGridHuntGame(width=width, height=height, num_food=num_food,
+                                            num_opponents=num_opponents, custom_walls=walls,
+                                            num_traps=num_traps, max_steps=max_steps)
+        self.env = copy.deepcopy(self.start_env)
 
         # Dynamically calculate cell size so the total canvas fits nicely within a 600x600 window ceiling
         max_canvas_dim = 600
@@ -133,9 +262,15 @@ class GridGameGUI:
         self.label = tk.Label(root, text="Score: 0 | Steps: 0", font=("Arial", 14))
         self.label.pack(pady=10)
 
-        self.btn = tk.Button(root, text="Start Simulation", command=self.run_loop, font=("Arial", 12), bg="#000066",
-                             fg="white")
-        self.btn.pack(pady=5)
+        self.btn_reflex = tk.Button(root, text="Run Simple Reflex Agent",
+                                    command=lambda: self.run_agent(SimpleReflexAgent(), "Simple Reflex"),
+                                    font=("Arial", 12), bg="#000066", fg="white")
+        self.btn_reflex.pack(pady=5)
+
+        self.btn_model = tk.Button(root, text="Run Model-Based Agent",
+                                   command=lambda: self.run_agent(ModelBasedAgent(), "Model-Based"),
+                                   font=("Arial", 12), bg="#166534", fg="white")
+        self.btn_model.pack(pady=5)
 
         self.draw_grid()
 
@@ -156,6 +291,13 @@ class GridGameGUI:
                 if self.cell_size >= 40 and (x, y) in self.env.walls:
                     self.canvas.create_text(x1 + self.cell_size / 2, y1 + self.cell_size / 2, text="W", fill="white",
                                             font=("Arial", 8, "bold"))
+
+        # trail of visited cells
+        for vx, vy in self.env.visited_cells:
+            cx = vx * self.cell_size + self.cell_size / 2
+            cy = (self.env.height - 1 - vy) * self.cell_size + self.cell_size / 2
+            r = self.cell_size * 0.1
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#93c5fd", outline="")
 
         for tx, ty in self.env.toxic_traps:
             x1 = tx * self.cell_size
@@ -188,27 +330,61 @@ class GridGameGUI:
         self.canvas.create_oval(x1, y1, x1 + self.cell_size * 0.7, y1 + self.cell_size * 0.7, fill="#000066",
                                 outline="#1e3a8a")
 
-    def run_loop(self):
-        self.btn.config(state="disabled")
+        # arrow for the direction it's facing
+        dx, dy = DELTA[self.env.facing]
+        cx = ax * self.cell_size + self.cell_size / 2
+        cy = (self.env.height - 1 - ay) * self.cell_size + self.cell_size / 2
+        self.canvas.create_line(cx, cy, cx + dx * self.cell_size * 0.35, cy - dy * self.cell_size * 0.35,
+                                fill="white", width=3, arrow=tk.LAST)
+
+    def run_agent(self, agent, name):
+        self.env = copy.deepcopy(self.start_env)  # fresh copy each run
+        self.btn_reflex.config(state="disabled")
+        self.btn_model.config(state="disabled")
+        is_memoryless = isinstance(agent, SimpleReflexAgent)
+        seen_states = set()
+
+        def finish(text):
+            self.label.config(text=text)
+            self.btn_reflex.config(state="normal")
+            self.btn_model.config(state="normal")
 
         def step():
+            # same state twice = it will loop forever
+            if is_memoryless:
+                state = (tuple(self.env.agent_pos), self.env.facing, frozenset(self.env.food_positions))
+                if state in seen_states:
+                    finish(f"{name}: INFINITE LOOP detected at step {self.env.steps}! "
+                           f"Food left: {len(self.env.food_positions)} | Score: {self.env.score}")
+                    return
+                seen_states.add(state)
+
             if not self.env.is_done():
-                action = random.choice(['Up', 'Down', 'Left', 'Right'])
+                percept = self.env.get_percept()
+                action = agent.sense_and_act(percept)
                 self.env.execute_action(action)
 
                 self.draw_grid()
-                self.label.config(text=f"Score: {self.env.score} | Steps: {self.env.steps} | Action: {action}")
-                self.root.after(250, step)
+                self.label.config(text=f"{name} | Score: {self.env.score} | Steps: {self.env.steps} | "
+                                       f"Action: {action} | Food left: {len(self.env.food_positions)}")
+                self.root.after(self.delay_ms, step)
             else:
-                end_text = f"Collision! Game Over! Final Score: {self.env.score}" if self.env.collision else f"Finished! Final Score: {self.env.score}"
-                self.label.config(text=end_text)
-                self.btn.config(state="normal")
+                if self.env.collision:
+                    end_text = f"Collision! Game Over! Final Score: {self.env.score}"
+                elif len(self.env.food_positions) == 0:
+                    end_text = f"{name}: all food eaten in {self.env.steps} steps! Final Score: {self.env.score}"
+                elif self.env.stopped:
+                    end_text = (f"{name}: explored everything and stopped. "
+                                f"Food left: {len(self.env.food_positions)} | Final Score: {self.env.score}")
+                else:
+                    end_text = f"{name}: step limit reached. Final Score: {self.env.score}"
+                finish(end_text)
 
         step()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    # Try a larger grid size like 12x12 with 15 food and 3 opponents!
-    app = GridGameGUI(root, width=12, height=12, num_food=15, num_opponents=0)
+    # 12x12, 15 food, no opponents or traps
+    app = GridGameGUI(root, width=12, height=12, num_food=15, num_opponents=0, num_traps=0)
     root.mainloop()
