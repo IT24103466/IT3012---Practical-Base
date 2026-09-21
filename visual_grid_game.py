@@ -145,7 +145,7 @@ class GridGameGUI:
     def __init__(self, root, width=10, height=10, num_food=12, num_opponents=2, walls=None, num_traps=0,
                  max_steps=1000, delay_ms=30):
         self.root = root
-        self.root.title("Practical 03: BFS vs DFS vs UCS")
+        self.root.title("Practical 04: A* Search")
         self.delay_ms = delay_ms
 
         # same layout every run so every agent gets the same world
@@ -175,6 +175,7 @@ class GridGameGUI:
             ("BFS", "#000066", lambda: self.run_search('BFS')),
             ("DFS", "#b45309", lambda: self.run_search('DFS')),
             ("UCS", "#7e22ce", lambda: self.run_search('UCS')),
+            ("A*", "#0f766e", lambda: self.run_search('AStar')),
             ("Reflex", "#475569", lambda: self.run_agent(SimpleReflexAgent(), "Simple Reflex")),
             ("Model-Based", "#166534", lambda: self.run_agent(ModelBasedAgent(), "Model-Based")),
         ]:
@@ -271,6 +272,9 @@ class GridGameGUI:
         is_memoryless = isinstance(agent, SimpleReflexAgent)
         seen_states = set()
 
+        def nodes():  # how many nodes the search has expanded (search agents only)
+            return f" | Nodes expanded: {agent.expanded}" if isinstance(agent, SearchAgent) else ""
+
         def finish(text):
             self.label.config(text=text)
             for b in self.buttons:
@@ -293,13 +297,14 @@ class GridGameGUI:
 
                 self.draw_grid()
                 self.label.config(text=f"{name} | Score: {self.env.score} | Steps: {self.env.steps} | "
-                                       f"Action: {action} | Food left: {len(self.env.food_positions)}")
+                                       f"Action: {action} | Food left: {len(self.env.food_positions)}" + nodes())
                 self.root.after(self.delay_ms, step)
             else:
                 if self.env.collision:
                     end_text = f"Collision! Game Over! Final Score: {self.env.score}"
                 elif len(self.env.food_positions) == 0:
-                    end_text = f"{name}: all food eaten in {self.env.steps} steps! Final Score: {self.env.score}"
+                    end_text = (f"{name}: all food eaten in {self.env.steps} steps! "
+                                f"Final Score: {self.env.score}" + nodes())
                 elif self.env.stopped:
                     end_text = (f"{name}: stopped, nothing left to reach. "
                                 f"Food left: {len(self.env.food_positions)} | Final Score: {self.env.score}")
